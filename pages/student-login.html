@@ -83,7 +83,7 @@
           <!-- Divider -->
           <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;">
             <div style="flex: 1; height: 1px; background: #E2DDF5;"></div>
-            <span style={{ fontSize: '0.75rem', color: '#9CA3AF', fontWeight: 600 }}>OR WITH EMAIL</span>
+            <span style="font-size: 0.75rem; color: #9CA3AF; font-weight: 600;">OR WITH EMAIL</span>
             <div style="flex: 1; height: 1px; background: #E2DDF5;"></div>
           </div>
 
@@ -584,16 +584,6 @@
       saveStoredStudent(currentProfile);
 
       showToast('Google Account verified! Proceeding to Course Setup...', 'success');
-      setTimeout(() => {
-        window.location.href = 'onboarding.html';
-      }, 500);
-    }
-
-      const currentProfile = getStoredStudent();
-      currentProfile.name = currentProfile.name || 'Google Student';
-      currentProfile.authProvider = 'google';
-      saveStoredStudent(currentProfile);
-
       setTimeout(() => {
         window.location.href = 'onboarding.html';
       }, 500);
