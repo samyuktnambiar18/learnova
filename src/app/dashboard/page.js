@@ -7,8 +7,8 @@ import Topbar from '@/components/Topbar';
 import { getStoredStudent, saveStoredStudent } from '@/lib/profile';
 
 const PRIMARY_WEBHOOK = "https://api.agents.snsihub.ai/webhook/d519ae83-ca78-4432-906a-728a293e202f";
-const SECONDARY_WEBHOOK = "https://api.agents.snsihub.ai/webhook/4a662d25-cbee-4e03-8afb-ecb929b27719";
 const TEST_WEBHOOK = "https://api.agents.snsihub.ai/webhook-test/d519ae83-ca78-4432-906a-728a293e202f";
+const SECONDARY_WEBHOOK = "https://api.agents.snsihub.ai/webhook/4a662d25-cbee-4e03-8afb-ecb929b27719";
 
 export default function DashboardPage() {
   const [student, setStudent] = useState(null);
@@ -35,12 +35,25 @@ export default function DashboardPage() {
 
   const parseBackendResponse = (data) => {
     if (!data) return [];
-    
+
+    // Unwrap SNS Workbench test execution response if nested
+    if (data && data.output && Array.isArray(data.output.items) && data.output.items.length > 0) {
+      const itemJson = data.output.items[0].json;
+      if (itemJson) data = itemJson;
+    }
+
+    if (typeof data === 'string') {
+      try { data = JSON.parse(data); } catch(e) {}
+    }
+    if (data && typeof data.syllabusText === 'string' && data.syllabusText.trim().startsWith('{')) {
+      try { data = JSON.parse(data.syllabusText); } catch(e) {}
+    }
+
     let rawCourses = [];
     if (Array.isArray(data)) {
       if (data.length > 0 && (data[0].videoId || data[0].title) && !data[0].topics && !data[0].course) {
         rawCourses = [{
-          course: "Syllabus Course",
+          course: "Personalized Syllabus Course",
           topics: Array.from(new Set(data.map(v => v.topic).filter(Boolean))),
           videos: data
         }];
@@ -57,7 +70,7 @@ export default function DashboardPage() {
     }
 
     return rawCourses.map((c, i) => {
-      const name = c.course || c.name || c.title || c.subject || `Course ${i + 1}`;
+      const name = c.course || c.name || c.title || c.subject || `Personalized Course ${i + 1}`;
       
       let topics = [];
       if (Array.isArray(c.topics)) topics = c.topics;
@@ -111,31 +124,43 @@ export default function DashboardPage() {
     formData.append("file", file);
 
     try {
-      let res;
+      let responseJson = null;
+
+      // 1. Try primary production endpoint
       try {
-        res = await fetch(PRIMARY_WEBHOOK, {
-          method: "POST",
-          body: formData
-        });
-        if (!res.ok && res.status === 404) {
-          try {
-            const testRes = await fetch(TEST_WEBHOOK, { method: "POST", body: formData });
-            if (testRes.ok) res = testRes;
-            else {
-              const secRes = await fetch(SECONDARY_WEBHOOK, { method: "POST", body: formData });
-              if (secRes.ok) res = secRes;
-            }
-          } catch (e) {}
+        const res = await fetch(PRIMARY_WEBHOOK, { method: "POST", body: formData });
+        if (res.ok) {
+          const data = await res.json();
+          if (!data.error || !data.error.includes("workflow inactive")) {
+            responseJson = data;
+          }
         }
-      } catch (networkErr) {
-        res = await fetch(SECONDARY_WEBHOOK, { method: "POST", body: formData });
+      } catch (e) {
+        console.warn("Primary webhook failed, trying test endpoint:", e);
       }
 
-      if (!res.ok) {
-        throw new Error(`Upload failed with status ${res.status}`);
+      // 2. Fallback to test mode endpoint (active during canvas editing in SNS workbench)
+      if (!responseJson) {
+        try {
+          const testRes = await fetch(TEST_WEBHOOK, { method: "POST", body: formData });
+          if (testRes.ok) {
+            responseJson = await testRes.json();
+          }
+        } catch (e) {
+          console.warn("Test webhook failed:", e);
+        }
       }
 
-      const responseJson = await res.json();
+      // 3. Fallback to secondary endpoint if needed
+      if (!responseJson) {
+        const secRes = await fetch(SECONDARY_WEBHOOK, { method: "POST", body: formData });
+        if (secRes.ok) {
+          responseJson = await secRes.json();
+        } else {
+          throw new Error(`Upload status ${secRes.status}`);
+        }
+      }
+
       console.log("Course generation response:", responseJson);
 
       const parsedCourses = parseBackendResponse(responseJson);
@@ -409,4 +434,5 @@ export default function DashboardPage() {
     </div>
   );
 }
+
 
