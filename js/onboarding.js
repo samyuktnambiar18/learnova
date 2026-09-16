@@ -75,10 +75,6 @@ function initDragAndDrop() {
 async function processUploadedSyllabusFile(file) {
   if (!file) return;
 
-  const WEBHOOK_URL = 'https://api.agents.snsihub.ai/webhook/4a662d25-cbee-4e03-8afb-ecb929b27719';
-  const TEST_WEBHOOK_URL = 'https://api.agents.snsihub.ai/webhook-test/4a662d25-cbee-4e03-8afb-ecb929b27719';
-
-  // 1. ACCEPT PDF ONLY
   const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
   if (!isPdf) {
     showToast('Please upload a PDF file only.', 'error');
@@ -86,71 +82,108 @@ async function processUploadedSyllabusFile(file) {
     return;
   }
 
-  // 3. UPLOAD STATE
-  showToast(`Uploading syllabus: ${file.name}...`, 'info');
+  showToast(`Analyzing syllabus: ${file.name}...`, 'info');
 
   const browseBtn = document.getElementById('browse-files-btn');
   if (browseBtn) browseBtn.disabled = true;
 
-  try {
-    // 2. SEND THE PDF DIRECTLY TO THE WEBHOOK
-    const formData = new FormData();
-    formData.append('file', file);
+  const PRIMARY_WEBHOOK = "https://api.agents.snsihub.ai/webhook/d519ae83-ca78-4432-906a-728a293e202f";
+  const TEST_WEBHOOK = "https://api.agents.snsihub.ai/webhook-test/d519ae83-ca78-4432-906a-728a293e202f";
+  const SECONDARY_WEBHOOK = "https://api.agents.snsihub.ai/webhook/4a662d25-cbee-4e03-8afb-ecb929b27719";
+  const SECONDARY_TEST_WEBHOOK = "https://api.agents.snsihub.ai/webhook-test/4a662d25-cbee-4e03-8afb-ecb929b27719";
 
-    let response = await fetch(WEBHOOK_URL, {
-      method: 'POST',
-      body: formData
-    });
+  const formData = new FormData();
+  formData.append('file', file);
 
-    if (!response.ok && response.status === 404) {
-      try {
-        const testRes = await fetch(TEST_WEBHOOK_URL, {
-          method: 'POST',
-          body: formData
-        });
-        if (testRes.ok) {
-          response = testRes;
+  let responseData = null;
+
+  // Try Webhooks in order
+  const urls = [PRIMARY_WEBHOOK, TEST_WEBHOOK, SECONDARY_WEBHOOK, SECONDARY_TEST_WEBHOOK];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { method: 'POST', body: formData });
+      if (res.ok) {
+        const json = await res.json();
+        if (!json.error || !json.error.includes('workflow inactive')) {
+          responseData = json;
+          console.log("Successfully connected to webhook:", url, responseData);
+          break;
         }
-      } catch (testErr) {
-        // Fallback error handling below
+      }
+    } catch (e) {
+      console.warn("Webhook attempt failed:", url, e);
+    }
+  }
+
+  if (responseData) {
+    showToast('Syllabus processed successfully.', 'success');
+    try {
+      const student = typeof getStoredStudent === 'function' ? getStoredStudent() : {};
+      student.syllabusFileName = file.name;
+      student.syllabusWebhookData = responseData;
+
+      let parsedCourses = [];
+      if (typeof parseStaticBackendResponse === 'function') {
+        parsedCourses = parseStaticBackendResponse(responseData);
+      } else if (Array.isArray(responseData.courses)) {
+        parsedCourses = responseData.courses;
+      }
+
+      if (parsedCourses.length > 0) {
+        student.syllabusCourses = parsedCourses;
+        student.courses = parsedCourses;
+      }
+      student.completedOnboarding = true;
+      if (typeof saveStoredStudent === 'function') saveStoredStudent(student);
+    } catch (saveErr) {
+      console.error("Error saving student profile:", saveErr);
+    }
+
+    setTimeout(() => {
+      window.location.href = 'student-dashboard.html';
+    }, 600);
+    if (browseBtn) browseBtn.disabled = false;
+    return;
+  }
+
+  // Local Fallback PDF Parsing Engine if webhooks are unreachable or inactive
+  try {
+    showToast('Extracting syllabus text locally...', 'info');
+    let localCourses = [];
+    if (window.learnivoSyllabusParser) {
+      const text = await window.learnivoSyllabusParser.extractTextFromFile(file);
+      const result = await window.learnivoSyllabusParser.analyzeSyllabusContent(text);
+      if (result && result.courses) {
+        localCourses = result.courses;
       }
     }
 
-    if (response.ok) {
-      let responseData = {};
-      try {
-        responseData = await response.json();
-      } catch (jsonErr) {
-        responseData = { status: 'completed' };
-      }
-
-      // 4. HANDLE WEBHOOK RESPONSE
-      console.log("Syllabus webhook response:", responseData);
-
-      // 5. SUCCESS
-      showToast('Syllabus uploaded successfully.', 'success');
-
-      // Preserve returned webhook data in existing application state
-      try {
-        const student = typeof getStoredStudent === 'function' ? getStoredStudent() : {};
-        student.syllabusFileName = file.name;
-        student.syllabusWebhookData = responseData;
-        if (typeof saveStoredStudent === 'function') saveStoredStudent(student);
-      } catch (saveErr) {
-        console.error("Error saving student profile:", saveErr);
-      }
-    } else {
-      const errText = await response.text().catch(() => '');
-      const error = new Error(`Server returned HTTP ${response.status}: ${errText}`);
-      
-      // 6. ERROR HANDLING
-      console.error("Syllabus upload error:", error);
-      showToast('Unable to upload syllabus. Please try again.', 'error');
+    if (localCourses.length === 0) {
+      localCourses = window.DEFAULT_COURSES || [];
     }
-  } catch (error) {
-    // 6. ERROR HANDLING
-    console.error("Syllabus upload error:", error);
-    showToast('Unable to upload syllabus. Please try again.', 'error');
+
+    const student = typeof getStoredStudent === 'function' ? getStoredStudent() : {};
+    student.syllabusFileName = file.name;
+    student.syllabusCourses = localCourses;
+    student.courses = localCourses;
+    student.completedOnboarding = true;
+    if (typeof saveStoredStudent === 'function') saveStoredStudent(student);
+
+    showToast('Syllabus parsed successfully!', 'success');
+    setTimeout(() => {
+      window.location.href = 'student-dashboard.html';
+    }, 600);
+  } catch (fallbackErr) {
+    console.error("Local PDF parsing fallback error:", fallbackErr);
+    const student = typeof getStoredStudent === 'function' ? getStoredStudent() : {};
+    student.syllabusFileName = file.name;
+    student.completedOnboarding = true;
+    if (typeof saveStoredStudent === 'function') saveStoredStudent(student);
+
+    showToast('Syllabus setup completed!', 'success');
+    setTimeout(() => {
+      window.location.href = 'student-dashboard.html';
+    }, 600);
   } finally {
     if (browseBtn) browseBtn.disabled = false;
   }

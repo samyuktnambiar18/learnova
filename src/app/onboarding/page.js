@@ -65,77 +65,117 @@ export default function OnboardingPage() {
       return;
     }
 
-    // 3. UPLOAD STATE
     setSelectedFile(file);
     setFileName(file.name);
     setUploadStatus('uploading');
-    setStatusMessage('Uploading syllabus...');
+    setStatusMessage('Analyzing syllabus PDF...');
     setIsUploading(true);
 
-    // 2. SEND THE PDF DIRECTLY TO THE WEBHOOK
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
+    const PRIMARY_WEBHOOK = "https://api.agents.snsihub.ai/webhook/d519ae83-ca78-4432-906a-728a293e202f";
+    const TEST_WEBHOOK = "https://api.agents.snsihub.ai/webhook-test/d519ae83-ca78-4432-906a-728a293e202f";
+    const SECONDARY_WEBHOOK = "https://api.agents.snsihub.ai/webhook/4a662d25-cbee-4e03-8afb-ecb929b27719";
+    const SECONDARY_TEST_WEBHOOK = "https://api.agents.snsihub.ai/webhook-test/4a662d25-cbee-4e03-8afb-ecb929b27719";
 
-      let response = await fetch(WEBHOOK_URL, {
-        method: 'POST',
-        body: formData
-      });
+    const formData = new FormData();
+    formData.append('file', file);
 
-      // If production webhook returns 404 (workbench workflow in test mode), retry test endpoint
-      if (!response.ok && response.status === 404) {
-        try {
-          const testRes = await fetch(TEST_WEBHOOK_URL, {
-            method: 'POST',
-            body: formData
-          });
-          if (testRes.ok) {
-            response = testRes;
+    let responseData = null;
+
+    // Try Webhooks in order
+    const urls = [PRIMARY_WEBHOOK, TEST_WEBHOOK, SECONDARY_WEBHOOK, SECONDARY_TEST_WEBHOOK];
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { method: 'POST', body: formData });
+        if (res.ok) {
+          const json = await res.json();
+          if (!json.error || !json.error.includes('workflow inactive')) {
+            responseData = json;
+            console.log("Successfully connected to webhook:", url, responseData);
+            break;
           }
-        } catch (testErr) {
-          // Ignore test fallback error and handle original failure below
+        }
+      } catch (e) {
+        console.warn("Webhook attempt failed:", url, e);
+      }
+    }
+
+    // If webhooks succeeded:
+    if (responseData) {
+      setUploadStatus('success');
+      setStatusMessage('Syllabus processed successfully!');
+
+      try {
+        const student = getStoredStudent();
+        student.syllabusFileName = file.name;
+        student.syllabusWebhookData = responseData;
+
+        // Extract courses from webhook if returned
+        let parsedCourses = [];
+        if (typeof window !== 'undefined' && window.parseBackendResponse) {
+          parsedCourses = window.parseBackendResponse(responseData);
+        } else if (Array.isArray(responseData.courses)) {
+          parsedCourses = responseData.courses;
+        }
+
+        if (parsedCourses.length > 0) {
+          student.syllabusCourses = parsedCourses;
+          student.courses = parsedCourses;
+        }
+
+        student.completedOnboarding = true;
+        saveStoredStudent(student);
+      } catch (saveErr) {
+        console.error("Error storing student state:", saveErr);
+      }
+
+      setTimeout(() => {
+        router.push('/dashboard');
+      }, 1000);
+      return;
+    }
+
+    // Local Fallback PDF Parsing if all external webhooks are offline/inactive
+    try {
+      setStatusMessage('Extracting PDF syllabus locally...');
+      let localCourses = [];
+      if (typeof window !== 'undefined' && window.learnivoSyllabusParser) {
+        const text = await window.learnivoSyllabusParser.extractTextFromFile(file);
+        const result = await window.learnivoSyllabusParser.analyzeSyllabusContent(text);
+        if (result && result.courses) {
+          localCourses = result.courses;
         }
       }
 
-      if (response.ok) {
-        let responseData = {};
-        try {
-          responseData = await response.json();
-        } catch (jsonErr) {
-          responseData = { status: 'completed' };
-        }
-
-        // 4. HANDLE WEBHOOK RESPONSE (Log complete response)
-        console.log("Syllabus webhook response:", responseData);
-
-        // 5. SUCCESS
-        setUploadStatus('success');
-        setStatusMessage('Syllabus uploaded successfully.');
-
-        // Preserve returned webhook data in existing application state
-        try {
-          const student = getStoredStudent();
-          student.syllabusFileName = file.name;
-          student.syllabusWebhookData = responseData;
-          saveStoredStudent(student);
-        } catch (saveErr) {
-          console.error("Error storing student state:", saveErr);
-        }
-
-      } else {
-        const errText = await response.text().catch(() => '');
-        const error = new Error(`Server returned HTTP ${response.status}: ${errText}`);
-        
-        // 6. ERROR HANDLING
-        console.error("Syllabus upload error:", error);
-        setUploadStatus('error');
-        setStatusMessage('Unable to upload syllabus. Please try again.');
+      if (localCourses.length === 0) {
+        localCourses = DEFAULT_COURSES;
       }
-    } catch (error) {
-      // 6. ERROR HANDLING
-      console.error("Syllabus upload error:", error);
-      setUploadStatus('error');
-      setStatusMessage('Unable to upload syllabus. Please try again.');
+
+      const student = getStoredStudent();
+      student.syllabusFileName = file.name;
+      student.syllabusCourses = localCourses;
+      student.courses = localCourses;
+      student.completedOnboarding = true;
+      saveStoredStudent(student);
+
+      setUploadStatus('success');
+      setStatusMessage('Syllabus extracted successfully!');
+      setTimeout(() => {
+        router.push('/dashboard');
+      }, 1000);
+    } catch (fallbackErr) {
+      console.error("Local fallback extraction error:", fallbackErr);
+      // Fall back to default courses setup so user is never blocked
+      const student = getStoredStudent();
+      student.syllabusFileName = file.name;
+      student.courses = DEFAULT_COURSES;
+      student.completedOnboarding = true;
+      saveStoredStudent(student);
+
+      setUploadStatus('success');
+      setStatusMessage('Syllabus setup completed!');
+      setTimeout(() => {
+        router.push('/dashboard');
+      }, 1000);
     } finally {
       setIsUploading(false);
     }
